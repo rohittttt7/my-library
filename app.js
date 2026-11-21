@@ -141,6 +141,7 @@ function openDialog(item = null) {
   $("youtubeUrl").value = item?.url || "";
   $("itemName").value = item?.name || "";
   $("itemNumber").value = item?.number || "";
+  $("categoryName").value = item?.category || "";
   $("editNameLabel").style.display = item ? "grid" : "none";
   $("numberLabel").style.display = item ? "grid" : "none";
   updateCategories();
@@ -162,7 +163,9 @@ function openDialog(item = null) {
   }
   if (!item) {
     $("newCategory").value = "";
+    $("categoryName").value = "";
     $("newCategoryLabel").style.display = "none";
+    $("categoryNameLabel").style.display = "grid";
   }
 }
 
@@ -273,9 +276,9 @@ $("categorySelect").addEventListener("change", () => {
 $("addForm").addEventListener("submit", async (event) => {
   event.preventDefault();
   const selected = $("categorySelect").value;
-  const category = selected === "__new"
-    ? ($("newCategory").value.trim() || "General")
-    : (selected || "General");
+  const typedCategory = $("categoryName").value.trim();
+  const category = typedCategory
+    || (selected === "__new" ? ($("newCategory").value.trim() || "General") : (selected || "General"));
 
   try {
     if (editingItem) {

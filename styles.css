@@ -160,6 +160,7 @@ dialog::backdrop { background: rgba(15, 23, 42, 0.38); }
 .secondary-button, .danger-button { height: 42px; border: 0; border-radius: 9px; padding: 0 16px; font-weight: 800; }
 .secondary-button { background: var(--accent-soft); color: var(--accent); }
 .danger-button { background: #fee2e2; color: #b91c1c; }
+.category-name-hint { color: var(--muted); font-size: 12px; font-weight: 400; }
 .viewer-actions { flex-wrap: wrap; }
 .viewer-actions button { min-height: 44px; }
 
