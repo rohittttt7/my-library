@@ -7,11 +7,39 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(DATA_DIR, "uploads");
 const DATA_FILE = path.join(DATA_DIR, "library.json");
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024;
+const SUPABASE_URL = (process.env.SUPABASE_URL || "").replace(/\/$/, "");
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || "library-files";
+const SUPABASE_ENABLED = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
 
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(DATA_FILE)) fs.writeFileSync(DATA_FILE, "[]");
 
-function readItems() {
+async function readItems() {
+  if (SUPABASE_ENABLED) {
+    const response = await fetch(
+      `${SUPABASE_URL}/rest/v1/library_items?select=*&order=number.asc`,
+      { headers: supabaseHeaders() }
+    );
+    if (!response.ok) throw new Error(`Could not read Supabase library: ${await response.text()}`);
+    const rows = await response.json();
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      category: row.category,
+      number: row.number,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      mime: row.mime,
+      extension: row.extension,
+      type: row.type,
+      text: row.text || "",
+      youtubeId: row.youtube_id,
+      url: row.url,
+      filePath: row.file_path,
+      originalFilename: row.original_filename
+    }));
+  }
   try {
     const items = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
     const sorted = items.sort((a, b) => (Number(a.number) || 0) - (Number(b.number) || 0));
@@ -29,7 +57,56 @@ function readItems() {
   }
 }
 
-function writeItems(items) {
+function supabaseHeaders(extra = {}) {
+  return {
+    apikey: SUPABASE_SERVICE_ROLE_KEY,
+    Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+    ...extra
+  };
+}
+
+function toSupabaseRow(item) {
+  return {
+    id: item.id,
+    name: item.name,
+    category: item.category,
+    number: item.number,
+    created_at: item.createdAt,
+    updated_at: item.updatedAt,
+    mime: item.mime,
+    extension: item.extension,
+    type: item.type,
+    text: item.text || null,
+    youtube_id: item.youtubeId || null,
+    url: item.url || null,
+    file_path: item.filePath || null,
+    original_filename: item.originalFilename || null
+  };
+}
+
+async function writeItems(items) {
+  if (SUPABASE_ENABLED) {
+    const existing = await readItems();
+    const keepIds = new Set(items.map((item) => item.id));
+    for (const item of existing) {
+      if (!keepIds.has(item.id)) await deleteSupabaseItem(item);
+    }
+    if (items.length) {
+      const response = await fetch(
+        `${SUPABASE_URL}/rest/v1/library_items?on_conflict=id`,
+        {
+          method: "POST",
+          headers: supabaseHeaders({
+            "Content-Type": "application/json",
+            Prefer: "resolution=merge-duplicates"
+          }),
+          body: JSON.stringify(items.map(toSupabaseRow))
+        }
+      );
+      if (!response.ok) throw new Error(`Could not save Supabase library: ${await response.text()}`);
+    }
+    return;
+  }
   fs.writeFileSync(DATA_FILE, JSON.stringify(items, null, 2));
 }
 
@@ -151,6 +228,19 @@ function nextNumber(items) {
   return items.length ? Math.max(...items.map((item) => Number(item.number) || 0)) + 1 : 1;
 }
 
+async function deleteSupabaseItem(item) {
+  if (item.filePath) {
+    await fetch(
+      `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(SUPABASE_BUCKET)}/${encodeURIComponent(item.filePath)}`,
+      { method: "DELETE", headers: supabaseHeaders() }
+    );
+  }
+  await fetch(
+    `${SUPABASE_URL}/rest/v1/library_items?id=eq.${encodeURIComponent(item.id)}`,
+    { method: "DELETE", headers: supabaseHeaders() }
+  );
+}
+
 function removeUploadedFile(item) {
   if (!item.filePath) return;
   const fullPath = path.resolve(UPLOAD_DIR, item.filePath);
@@ -164,14 +254,18 @@ const server = http.createServer(async (request, response) => {
   const pathname = decodeURIComponent(url.pathname);
 
   if (pathname === "/api/items" && request.method === "GET") {
-    return sendJson(response, 200, readItems());
+    try {
+      return sendJson(response, 200, await readItems());
+    } catch (error) {
+      return sendJson(response, 500, { error: error.message });
+    }
   }
 
   if (pathname === "/api/items/text" && request.method === "POST") {
     try {
       const body = await parseJson(request);
       if (!body.name?.trim()) return sendJson(response, 400, { error: "Title is required" });
-      const items = readItems();
+      const items = await readItems();
       const item = {
         id: String(Date.now()),
         name: body.name.trim(),
@@ -185,7 +279,7 @@ const server = http.createServer(async (request, response) => {
         text: body.text || ""
       };
       items.push(item);
-      writeItems(items);
+      await writeItems(items);
       return sendJson(response, 201, item);
     } catch (error) {
       return sendJson(response, 400, { error: error.message });
@@ -197,7 +291,7 @@ const server = http.createServer(async (request, response) => {
       const body = await parseJson(request);
       const id = getYouTubeId(body.url || "");
       if (!id) return sendJson(response, 400, { error: "A valid YouTube link is required" });
-      const items = readItems();
+      const items = await readItems();
       const item = {
         id: String(Date.now()),
         name: body.name?.trim() || "YouTube video",
@@ -212,7 +306,7 @@ const server = http.createServer(async (request, response) => {
         url: body.url.trim()
       };
       items.push(item);
-      writeItems(items);
+      await writeItems(items);
       return sendJson(response, 201, item);
     } catch (error) {
       return sendJson(response, 400, { error: error.message });
@@ -223,11 +317,28 @@ const server = http.createServer(async (request, response) => {
     try {
       const { fields, files } = await parseMultipart(request);
       if (!files.length) return sendJson(response, 400, { error: "Choose at least one file" });
-      const items = readItems();
+      const items = await readItems();
       const created = [];
       for (const file of files) {
         const storedName = safeFilename(file.filename);
-        fs.writeFileSync(path.join(UPLOAD_DIR, storedName), file.data);
+        if (SUPABASE_ENABLED) {
+          const uploadResponse = await fetch(
+            `${SUPABASE_URL}/storage/v1/object/${encodeURIComponent(SUPABASE_BUCKET)}/${encodeURIComponent(storedName)}`,
+            {
+              method: "POST",
+              headers: supabaseHeaders({
+                "Content-Type": getMime(file.filename),
+                "x-upsert": "true"
+              }),
+              body: file.data
+            }
+          );
+          if (!uploadResponse.ok) {
+            throw new Error(`Could not upload file to Supabase: ${await uploadResponse.text()}`);
+          }
+        } else {
+          fs.writeFileSync(path.join(UPLOAD_DIR, storedName), file.data);
+        }
         const item = {
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           name: fields.name?.trim() || file.filename,
@@ -244,7 +355,7 @@ const server = http.createServer(async (request, response) => {
         items.push(item);
         created.push(item);
       }
-      writeItems(items);
+      await writeItems(items);
       return sendJson(response, 201, created);
     } catch (error) {
       return sendJson(response, 400, { error: error.message });
@@ -255,7 +366,7 @@ const server = http.createServer(async (request, response) => {
     try {
       const body = await parseJson(request);
       if (!Array.isArray(body.ids)) return sendJson(response, 400, { error: "Item order is required" });
-      const items = readItems();
+      const items = await readItems();
       const byId = new Map(items.map((item) => [item.id, item]));
       const reordered = body.ids.map((id) => byId.get(id)).filter(Boolean);
       items.forEach((item) => {
@@ -265,7 +376,7 @@ const server = http.createServer(async (request, response) => {
         item.number = index + 1;
         item.updatedAt = Date.now();
       });
-      writeItems(reordered);
+      await writeItems(reordered);
       return sendJson(response, 200, reordered);
     } catch (error) {
       return sendJson(response, 400, { error: error.message });
@@ -278,7 +389,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === "PUT") {
       try {
         const body = await parseJson(request);
-        const items = readItems();
+        const items = await readItems();
         const index = items.findIndex((item) => item.id === id);
         if (index < 0) return sendJson(response, 404, { error: "Item not found" });
         const item = items[index];
@@ -306,7 +417,7 @@ const server = http.createServer(async (request, response) => {
           const sorted = items.sort((a, b) => a.number - b.number);
           sorted.forEach((entry, index) => { entry.number = index + 1; });
         }
-        writeItems(items);
+        await writeItems(items);
         return sendJson(response, 200, item);
       } catch (error) {
         return sendJson(response, 400, { error: error.message });
@@ -314,19 +425,26 @@ const server = http.createServer(async (request, response) => {
     }
 
     if (request.method === "DELETE") {
-      const items = readItems();
+      const items = await readItems();
       const item = items.find((entry) => entry.id === id);
       if (!item) return sendJson(response, 404, { error: "Item not found" });
       removeUploadedFile(item);
       const remaining = items.filter((entry) => entry.id !== id).sort((a, b) => a.number - b.number);
       remaining.forEach((entry, index) => { entry.number = index + 1; });
-      writeItems(remaining);
+      await writeItems(remaining);
       return sendJson(response, 200, { ok: true });
     }
   }
 
   if (pathname.startsWith("/uploads/")) {
     const filename = path.basename(pathname);
+    if (SUPABASE_ENABLED) {
+      response.writeHead(302, {
+        Location: `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${encodeURIComponent(filename)}`
+      });
+      response.end();
+      return;
+    }
     return sendFile(response, path.join(UPLOAD_DIR, filename));
   }
 
