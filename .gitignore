@@ -1,5 +1,8 @@
 node_modules/
-data/library.json
-data/uploads/*
+data/
+.env
+.env.*
+!.env.example
+production.env
 *.log
 .DS_Store

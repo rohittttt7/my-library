@@ -2,16 +2,16 @@ services:
   - type: web
     name: my-library
     runtime: node
-    buildCommand: npm install
+    buildCommand: node --check start.mjs && node --check render-server.mjs
     startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeployTrigger: commit
     envVars:
       - key: NODE_VERSION
-        value: 20
-      - key: DATA_DIR
-        value: /opt/render/project/src/data
-      - key: UPLOAD_DIR
-        value: /opt/render/project/src/data/uploads
-    disk:
-      name: library-data
-      mountPath: /opt/render/project/src/data
-      sizeGB: 1
+        value: "22.23.3"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: LIBRARY_ACCESS_PASSWORD
+        sync: false
