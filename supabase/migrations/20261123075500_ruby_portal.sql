@@ -42,8 +42,12 @@ CREATE OR REPLACE FUNCTION public.ruby_portal_category(value text)
 RETURNS text LANGUAGE sql IMMUTABLE SET search_path = '' AS $$
   SELECT CASE regexp_replace(lower(coalesce(value, '')), '[^a-z]+', '', 'g')
     WHEN 'english' THEN 'english' WHEN 'englishtutorial' THEN 'english' WHEN 'englishtutorials' THEN 'english'
+    WHEN 'categoryyoutubeenglish' THEN 'english'
     WHEN 'hindi' THEN 'hindi' WHEN 'hinditutorial' THEN 'hindi' WHEN 'hinditutorials' THEN 'hindi'
+    WHEN 'categoryyoutubehindi' THEN 'hindi'
     WHEN 'workflow' THEN 'workflows' WHEN 'workflows' THEN 'workflows'
+    WHEN 'categoriesworkflow' THEN 'workflows'
+    WHEN 'categoriesdetailcontent' THEN 'description'
     ELSE 'description'
   END;
 $$;
