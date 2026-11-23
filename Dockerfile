@@ -6,4 +6,4 @@ RUN mkdir /app/data && chown node:node /app/data
 ENV PORT=3000 NODE_ENV=production
 USER node
 VOLUME ["/app/data"]
-CMD ["node", "server.mjs"]
+CMD ["node", "start.mjs"]

@@ -1,14 +1,11 @@
 services:
   - type: web
     name: my-library
-    runtime: node
-    buildCommand: node --check start.mjs && node --check render-server.mjs
-    startCommand: npm start
+    runtime: docker
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /healthz
     autoDeployTrigger: commit
     envVars:
-      - key: NODE_VERSION
-        value: "22.23.3"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SECRET_KEY
