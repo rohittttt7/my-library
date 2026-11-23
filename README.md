@@ -21,7 +21,7 @@ The app listens only on this computer's loopback address. Anyone who can use the
 
 The Render variant uses the earlier My Library application's `public.library_items` table and its existing Supabase Storage bucket. The default bucket is `library-files`. The PostgreSQL migration adds folders, descriptions, and progress without overwriting existing items or renaming files. The new pages recognize legacy category labels and show other legacy categories under **Description**.
 
-Before deploying over the existing service, check the migration against its actual Supabase schema and take a backup. Apply [the Supabase migration](supabase/migrations/20261123075500_ruby_portal.sql) to the existing project. The old server could send direct public links to Storage. If its bucket is public, coordinate making it private with the Render cutover. The updated service checks the bucket at startup and proxies file access itself. Old direct public links stop working when the bucket becomes private. [Supabase Storage access controls](https://supabase.com/docs/guides/storage/security/access-control)
+The `my-library-ilur.onrender.com` service can launch the updated frontend using its existing Supabase schema and access settings. In that mode, learning progress stays in each browser. [The Supabase migration](supabase/migrations/20261123075500_ruby_portal.sql) enables folders, drafts, and shared progress. Restart the service after applying it. The updated service proxies file access. When moving a public bucket to private access, old direct Storage links stop working. [Supabase Storage access controls](https://supabase.com/docs/guides/storage/security/access-control)
 
 Use the existing Render web service and its linked GitHub repository and branch to retain the current URL. Set **Auto-Deploy** to **On Commit**. `render.yaml` declares the same setting for services managed by a Blueprint. Run `npm start` to launch the portal. Render supplies `PORT` and `RENDER_EXTERNAL_URL`, and the start command uses those settings to select the Supabase backend. Use Node 22.19 or later and `/healthz` for the health check. [Render GitHub auto-deploy](https://render.com/docs/deploys#automatic-deploys)
 
@@ -30,7 +30,7 @@ Set these values under Environment on the existing service. Keep the credentials
 - `SUPABASE_URL` is the existing Supabase project's HTTPS URL.
 - `SUPABASE_SECRET_KEY` is the server-side Supabase secret. `SUPABASE_SERVICE_ROLE_KEY` also works for a legacy credential.
 - `SUPABASE_BUCKET` is the private bucket if it uses a name other than `library-files`.
-- `LIBRARY_ACCESS_PASSWORD` is a shared password of at least 16 characters. `LIBRARY_ACCESS_USER` defaults to `ruby`. The browser prompts for this password before opening the portal. The app serves no separate login page.
+- `LIBRARY_ACCESS_PASSWORD` is a shared password of at least 16 characters. It is required for new deployments. The existing Render service uses its current access settings until a password is configured. `LIBRARY_ACCESS_USER` defaults to `ruby`. The browser prompts for the password when configured.
 - `PUBLIC_ORIGIN` is needed only when the service uses a different public address from its Render-provided URL.
 
 The Render variant allows up to 50 MB per file and keeps local SQLite data separate. [Supabase upload limits](https://supabase.com/docs/guides/storage/uploads/file-limits)

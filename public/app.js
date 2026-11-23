@@ -6,6 +6,8 @@ const tones = { english: 'plum', hindi: 'peach', workflows: 'sage', description:
 let categories = [];
 let fileExtensions = [];
 let fileLimitMb;
+let legacy = false;
+let deviceProgress = {};
 let state = null;
 let keyword = '';
 let filter = '';
@@ -21,6 +23,7 @@ const byId = id => state.items.find(item => item.id === id);
 const children = parent => state.items.filter(item => item.parent === (parent ?? null));
 const completion = id => Boolean(state.progress.find(row => row.item_id === id)?.completed);
 const descriptor = item => item.kind === 'file' && item.filename ? item.filename.split('.').at(-1).toUpperCase() : kinds[item.kind];
+const availableKinds = () => Object.entries(kinds).filter(([kind]) => !legacy || kind !== 'folder');
 
 async function api(path, method = 'GET', data) {
   const form = data instanceof FormData;
@@ -32,6 +35,12 @@ async function api(path, method = 'GET', data) {
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || 'Something went wrong.');
   return result;
+}
+
+async function updateProgress(id, completed) {
+  if (!legacy) return api(`/progress/${id}`, 'POST', { completed });
+  deviceProgress[id] = { item_id: id, completed: completed ?? deviceProgress[id]?.completed ?? false, updated: Date.now() };
+  try { localStorage.setItem('ruby-learning-progress', JSON.stringify(deviceProgress)); } catch { /* session progress remains available */ }
 }
 
 function flash(message) {
@@ -74,11 +83,12 @@ async function navigate({ preserveSearch = false, focus = false } = {}) {
   try {
     const library = await api(`/library?category=${encodeURIComponent(target.category.id)}`);
     if (load !== revision) return;
-    state = { ...target, ...library };
+    const progress = legacy ? library.items.map(item => deviceProgress[item.id]).filter(Boolean) : library.progress;
+    state = { ...target, ...library, progress };
     renderLibrary();
     const item = target.id && byId(target.id);
     if (item && item.kind !== 'folder') {
-      api(`/progress/${item.id}`, 'POST', {}).catch(() => {});
+      updateProgress(item.id).catch(() => {});
     }
     if (focus) main.focus({ preventScroll: true });
   } catch (error) {
@@ -124,7 +134,7 @@ function renderLibrary() {
   const subhead = item ? 'Folder contents' : category.id === 'description' ? 'About the portal' : category.id === 'workflows' ? 'Workflow library' : 'Lesson library';
   main.innerHTML = `${breadcrumbs(item)}<section class="hero ${tones[category.id]}"><div class="hero-text">${icon(category)}<h1>${escape(title)}</h1>${description ? `<p>${escape(description)}</p>` : ''}</div><div class="book-art" aria-hidden="true"><i></i><i></i><i></i></div></section>
     ${progress}<section class="library" aria-labelledby="library-title"><div class="section-heading"><h2 id="library-title">${subhead}</h2><button class="button primary" data-action="add">+ Add Content</button></div>
-    <div class="filters"><label class="search"><span class="sr-only">Search ${escape(category.title)}</span><input type="search" id="search" placeholder="Search this category" value="${escape(keyword)}"></label><label><span class="sr-only">Filter by content type</span><select id="filter"><option value="">Content type</option>${Object.entries(kinds).map(([key, value]) => `<option value="${key}"${selected(filter, key)}>${value}</option>`).join('')}</select></label></div>
+    <div class="filters"><label class="search"><span class="sr-only">Search ${escape(category.title)}</span><input type="search" id="search" placeholder="Search this category" value="${escape(keyword)}"></label><label><span class="sr-only">Filter by content type</span><select id="filter"><option value="">Content type</option>${availableKinds().map(([key, value]) => `<option value="${key}"${selected(filter, key)}>${value}</option>`).join('')}</select></label></div>
     <div id="items" aria-live="polite"></div></section>`;
   renderList();
 }
@@ -207,10 +217,10 @@ function contentForm(item) {
   const type = item?.kind || 'file';
   const link = item?.kind === 'youtube' ? `https://www.youtube.com/watch?v=${item.body}` : item?.kind === 'loop' ? item.body : '';
   showDialog(item ? 'Edit content' : 'Add Content', `<form id="content-form" data-id="${item?.id || ''}"><label>Title<input name="title" required maxlength="160" value="${escape(item?.title)}"></label>
-    <div class="form-grid"><label>Content type<select name="kind">${Object.entries(kinds).map(([key, value]) => `<option value="${key}"${selected(type, key)}>${value}</option>`).join('')}</select></label>
+    <div class="form-grid"><label>Content type<select name="kind">${availableKinds().map(([key, value]) => `<option value="${key}"${selected(type, key)}>${value}</option>`).join('')}</select></label>
     <label>Category<select name="category">${categories.map(entry => `<option value="${entry.id}"${selected(category, entry.id)}>${escape(entry.title)}</option>`).join('')}</select></label></div>
-    <div class="form-grid"><label>Folder<select name="parent"><option value="">Category root</option>${parentOptions.map(folder => `<option value="${folder.id}"${selected(parent, folder.id)}>${escape(folderPath(folder))}</option>`).join('')}</select></label>
-    <label>Status<select name="status"><option value="published"${selected(item?.status, 'published')}>Published</option><option value="draft"${selected(item?.status, 'draft')}>Draft</option></select></label></div>
+    ${legacy ? '' : `<div class="form-grid"><label>Folder<select name="parent"><option value="">Category root</option>${parentOptions.map(folder => `<option value="${folder.id}"${selected(parent, folder.id)}>${escape(folderPath(folder))}</option>`).join('')}</select></label>
+    <label>Status<select name="status"><option value="published"${selected(item?.status, 'published')}>Published</option><option value="draft"${selected(item?.status, 'draft')}>Draft</option></select></label></div>`}
     <label>Description <span class="optional">(optional)</span><textarea name="description" rows="2" maxlength="1200">${escape(item?.description)}</textarea></label>
     <label data-for="note">Note<textarea name="note" rows="6" maxlength="12000">${escape(item?.kind === 'note' ? item.body : '')}</textarea></label>
     <label data-for="link"><span data-link-label>Link</span><input type="text" inputmode="url" name="link" maxlength="2000" value="${escape(link)}" autocomplete="off" spellcheck="false" aria-describedby="link-hint"><small id="link-hint"></small></label>
@@ -256,7 +266,7 @@ async function submit(event) {
     let destination;
     if (form.id === 'content-form') {
       const fields = Object.fromEntries(new FormData(form));
-      const data = { title: fields.title, category: fields.category, parent: fields.parent, kind: fields.kind, status: fields.status, description: fields.description, body: fields.kind === 'note' ? fields.note : fields.link || '' };
+      const data = { title: fields.title, category: fields.category, parent: fields.parent, kind: fields.kind, status: fields.status ?? 'published', description: fields.description, body: fields.kind === 'note' ? fields.note : fields.link || '' };
       let payload = data;
       if (fields.kind === 'file' && fields.file?.size) {
         if (fields.file.size > fileLimitMb * 1024 * 1024) throw new Error(`Choose a file up to ${fileLimitMb} MB.`);
@@ -306,7 +316,7 @@ async function click(event) {
       document.querySelector(`[data-action="edit"][data-id="${id}"]`)?.focus();
     } else if (action === 'complete') {
       const completed = !completion(id);
-      await api(`/progress/${id}`, 'POST', { completed });
+      await updateProgress(id, completed);
       await navigate({ preserveSearch: true });
       document.querySelector('[data-action="complete"]')?.focus();
     }
@@ -328,7 +338,7 @@ document.addEventListener('change', async event => {
     const filename = input.files[0].name;
     input.form.elements.title.value = (filename.replace(/\.[^.]+$/, '') || filename).slice(0, 160);
   }
-  if (input.name === 'category') {
+  if (input.name === 'category' && !legacy) {
     const folders = input.form.elements.parent;
     const category = input.value;
     folders.replaceChildren(new Option('Category root', ''));
@@ -350,6 +360,9 @@ document.addEventListener('change', async event => {
 window.addEventListener('hashchange', () => { if (categories.length && (!location.hash || location.hash.startsWith('#/'))) navigate({ focus: true }); });
 
 try {
-  ({ categories, fileExtensions, fileLimitMb } = await api('/config'));
+  ({ categories, fileExtensions, fileLimitMb, legacy = false } = await api('/config'));
+  if (legacy) {
+    try { deviceProgress = JSON.parse(localStorage.getItem('ruby-learning-progress')) || {}; } catch { /* start with fresh progress */ }
+  }
   await navigate();
 } catch (error) { app.innerHTML = `<main id="main" class="loading"><p role="alert">${escape(error.message)}</p><a class="button" href="/">Reload portal</a></main>`; }

@@ -56,7 +56,8 @@ CREATE OR REPLACE FUNCTION public.ruby_portal_record(item public.library_items, 
 RETURNS jsonb LANGUAGE sql STABLE SET search_path = '' AS $$
   SELECT jsonb_build_object(
     'id', item.id, 'category', public.ruby_portal_category(item.category), 'parent', item.parent_id,
-    'title', item.name, 'description', item.description, 'position', item.number, 'status', item.publication_status,
+    'title', item.name, 'description', coalesce(nullif(item.description, ''), CASE WHEN item.type = 'text' THEN item.url ELSE item.text END, ''),
+    'position', item.number, 'status', item.publication_status,
     'kind', CASE WHEN item.type = 'text' THEN 'note' ELSE item.type END,
     'body', coalesce(CASE item.type WHEN 'youtube' THEN item.youtube_id WHEN 'loop' THEN item.url ELSE item.text END, ''),
     'mime', item.mime, 'filename', item.original_filename

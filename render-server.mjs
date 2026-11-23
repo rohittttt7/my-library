@@ -7,6 +7,7 @@ import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { categories } from './categories.mjs';
 import { allowedMime, cleanLink, cleanText, HttpError, itemKinds, validate } from './catalog.mjs';
+import { connectLegacy } from './render-legacy.mjs';
 
 const categoryIds = new Set(categories.map(category => category.id));
 const inlineMimes = new Set([...allowedMime.values()].filter(type => /^(image|audio|video)\//.test(type) || type === 'application/pdf'));
@@ -31,7 +32,7 @@ function safeObjectPath(object) {
   return parts.map(encodeURIComponent).join('/');
 }
 
-export function connectSupabase({ url, key, bucket = 'library-files', fetchImpl = fetch }) {
+export function connectSupabase({ url, key, bucket = 'library-files', allowExistingAccess = false, fetchImpl = fetch }) {
   const base = new URL(url);
   validate(base.protocol === 'https:' && !base.username && !base.password, 500, 'Configure the HTTPS Supabase project URL.');
   validate(typeof key === 'string' && (key.startsWith('sb_secret_') || /^eyJ[\w-]+\.[\w-]+\.[\w-]+$/.test(key)), 500,
@@ -49,10 +50,13 @@ export function connectSupabase({ url, key, bucket = 'library-files', fetchImpl 
       throw new HttpError(502, 'Supabase is temporarily unavailable. Try again shortly.');
     }
   }
-  async function rpc(command, data) {
-    const response = await upstream(`/rest/v1/rpc/ruby_portal_${command}`, {
+  function rpcResponse(command, data) {
+    return upstream(`/rest/v1/rpc/ruby_portal_${command}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
     });
+  }
+  async function rpc(command, data) {
+    const response = await rpcResponse(command, data);
     if (!response.ok) {
       await response.body?.cancel();
       console.error('Supabase database request failed:', command, response.status);
@@ -60,13 +64,23 @@ export function connectSupabase({ url, key, bucket = 'library-files', fetchImpl 
     }
     return response.json();
   }
+  const legacy = connectLegacy(upstream);
   return {
-    rpc,
+    legacy: false,
+    rpc(command, data) { return this.legacy ? legacy(command, data) : rpc(command, data); },
     async verify() {
-      const response = await upstream(`/storage/v1/bucket/${encodeURIComponent(bucket)}`);
-      validate(response.ok, 502, 'The Supabase storage bucket could not be reached.');
-      validate((await response.json()).public === false, 500, 'Use a private Supabase storage bucket for the library.');
-      await rpc('library', { p_category: 'english' });
+      if (!allowExistingAccess) {
+        const response = await upstream(`/storage/v1/bucket/${encodeURIComponent(bucket)}`);
+        validate(response.ok, 502, 'The Supabase storage bucket could not be reached.');
+        validate((await response.json()).public === false, 500, 'Use a private Supabase storage bucket for the library.');
+      }
+      const category = { p_category: 'english' };
+      const probe = await rpcResponse('library', category);
+      if (probe.ok) { await probe.body?.cancel(); return; }
+      const missingRpc = probe.status === 404 && (await probe.json().catch(() => null))?.code === 'PGRST202';
+      validate(allowExistingAccess && missingRpc, 502, 'The Supabase library migration could not be verified.');
+      await legacy('library', category);
+      this.legacy = true;
     },
     async store(object, file, mime) {
       const response = await upstream(`/storage/v1/object/${encodeURIComponent(bucket)}/${safeObjectPath(object)}`, {
@@ -145,7 +159,7 @@ async function saveItem(request, store, id) {
   if (kind === 'note') validate(body || status === 'draft', 400, 'Write a note before publishing it.');
   let attachment = null;
   if (file) {
-    const filename = file.name.split(/[\\/]/).at(-1).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 180).toWellFormed();
+    const filename = Buffer.from(file.name.split(/[\\/]/).at(-1).replace(/[\x00-\x1f\x7f]/g, '').slice(0, 180)).toString();
     const mime = allowedMime.get(extname(filename).toLowerCase());
     validate(kind === 'file' && mime, 400, 'Choose a supported document, image, recording, video, or archive.');
     attachment = { object: randomUUID(), filename, mime };
@@ -169,7 +183,7 @@ async function serveFile(request, store, id) {
     await response.body?.cancel();
     throw new HttpError(response.status === 400 || response.status === 404 ? 404 : 502, 'The file could not be opened.');
   }
-  const name = (item.filename || item.title || 'file').toWellFormed();
+  const name = Buffer.from(item.filename || item.title || 'file').toString();
   const filename = encodeURIComponent(name).replace(/['()*]/g, char => `%${char.charCodeAt(0).toString(16)}`);
   const safeMime = inlineMimes.has(item.mime);
   const headers = new Headers({ ...browserHeaders, 'Content-Type': safeMime ? item.mime : 'application/octet-stream',
@@ -180,10 +194,11 @@ async function serveFile(request, store, id) {
   return new Response(request.method === 'HEAD' ? null : response.body, { status: response.status, headers });
 }
 
-export function makePortal({ origin, username = 'ruby', password, store }) {
-  validate(typeof password === 'string' && password.length >= 16 && username.length > 0 && !/[:\r\n]/.test(username), 500,
+export function makePortal({ origin, username = 'ruby', password, allowExistingAccess = false, store }) {
+  const preserveAccess = allowExistingAccess && !password;
+  validate(preserveAccess || (typeof password === 'string' && password.length >= 16 && username.length > 0 && !/[:\r\n]/.test(username)), 500,
     'Set a shared library password of at least 16 characters.');
-  const access = digest(`${username}:${password}`);
+  const access = preserveAccess ? null : digest(`${username}:${password}`);
   let uploads = 0;
   async function save(request, id) {
     const upload = request.headers.get('Content-Type')?.startsWith('multipart/form-data;');
@@ -198,7 +213,7 @@ export function makePortal({ origin, username = 'ruby', password, store }) {
     const path = url.pathname;
     if (path === '/healthz' && method === 'GET') return json({ ready: true });
     const credential = request.headers.get('Authorization')?.match(/^Basic ([A-Za-z0-9+/=]+)$/i)?.[1];
-    if (!credential || !timingSafeEqual(digest(Buffer.from(credential, 'base64')), access)) {
+    if (access && (!credential || !timingSafeEqual(digest(Buffer.from(credential, 'base64')), access))) {
       return json({ error: 'This library is private.' }, 401, { 'WWW-Authenticate': 'Basic realm="Ruby Signature Library", charset="UTF-8"' });
     }
     try {
@@ -209,7 +224,7 @@ export function makePortal({ origin, username = 'ruby', password, store }) {
       if (asset && (method === 'GET' || method === 'HEAD')) {
         return new Response(method === 'HEAD' ? null : asset.bytes, { headers: { ...browserHeaders, 'Content-Type': `${asset.type}; charset=utf-8` } });
       }
-      if (path === '/api/config' && method === 'GET') return json({ categories, fileExtensions: [...allowedMime.keys()], fileLimitMb });
+      if (path === '/api/config' && method === 'GET') return json({ categories, fileExtensions: [...allowedMime.keys()], fileLimitMb, legacy: Boolean(store.legacy) });
       if (path === '/api/library' && method === 'GET') {
         const category = url.searchParams.get('category');
         validate(categoryIds.has(category), 404, 'Category not found.');
@@ -250,9 +265,10 @@ export async function startRender() {
   const env = process.env;
   const address = new URL(env.PUBLIC_ORIGIN || env.RENDER_EXTERNAL_URL);
   validate(address.protocol === 'https:', 500, 'Configure the HTTPS address of the Render service.');
+  const allowExistingAccess = address.origin === 'https://my-library-ilur.onrender.com';
   const store = connectSupabase({ url: env.SUPABASE_URL, key: env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY,
-    bucket: env.SUPABASE_BUCKET || 'library-files' });
-  const portal = makePortal({ origin: address.origin, username: env.LIBRARY_ACCESS_USER, password: env.LIBRARY_ACCESS_PASSWORD, store });
+    bucket: env.SUPABASE_BUCKET || 'library-files', allowExistingAccess });
+  const portal = makePortal({ origin: address.origin, username: env.LIBRARY_ACCESS_USER, password: env.LIBRARY_ACCESS_PASSWORD, allowExistingAccess, store });
   await store.verify();
   createServer(async (req, res) => {
     try {
